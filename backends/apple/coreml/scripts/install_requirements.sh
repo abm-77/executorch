@@ -75,12 +75,13 @@ if [[ "$(uname)" == "Darwin" ]]; then
 fi
 
 echo "${green}ExecuTorch: Installing coremltools dependencies.${reset}"
+# Not coremltools' reqs/build.pip, whose old numpy pin would downgrade the caller's numpy.
 SDKROOT="$HOST_SDKROOT" \
 CC="$HOST_CC" \
 CXX="$HOST_CXX" \
 CFLAGS="$HOST_CFLAGS" \
 CXXFLAGS="$HOST_CXXFLAGS" \
-python -m pip install -r "$COREMLTOOLS_DIR_PATH/reqs/build.pip"
+python -m pip install numpy setuptools
 STATUS=$?
 if [ $STATUS -ne 0 ]; then
     echo "${red}ExecuTorch: Failed to install coremltools dependencies.${reset}"
