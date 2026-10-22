@@ -49,7 +49,8 @@ class PropagateDeviceConfig:
     # When True, method-level input tensors that feed directly into a device
     # delegate are NOT wrapped with _h2d_copy. The user must provide tensors
     # already on the target device. Useful for pipelines where inputs are
-    # pre-staged on GPU.
+    # pre-staged on GPU. Constants are not passed by the caller, so they are
+    # still copied: their data stays in the program on the host.
     #
     # Pair with MemoryPlanningPass(alloc_graph_input=False), or the runtime reserves its own buffer
     # for the input and copies the caller's memory into it, which is what this exists to avoid.

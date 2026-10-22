@@ -135,14 +135,19 @@ def _tag_specs_with_device(
     return False
 
 
-def _clone_spec_with_device(
+def _copy_output_spec(
     spec: TensorSpec,
     device_type: schema.DeviceType,
     device_index: int = 0,
 ) -> TensorSpec:
-    """Create a copy of a TensorSpec with a different device."""
+    """Create the spec of an _h2d_copy or _d2h_copy output from the spec it copies.
+
+    The output lives on ``device_type``. The copy writes it at run time, so it is
+    never a constant, even when the copied tensor is one.
+    """
     new_spec = copy.copy(spec)
     new_spec.init_mem_planning_fields()
+    new_spec.const = False
     _set_device_on_spec(new_spec, device_type, device_index)
     return new_spec
 
@@ -163,7 +168,9 @@ class PropagateDevicePass(PassBase):
     Skip-copy optimizations:
     - skip_h2d_for_method_inputs: If the input is a graph-level placeholder
       feeding directly to a delegate, don't insert H2D — tag the placeholder
-      as device instead (user provides GPU tensor at runtime).
+      as device instead (user provides GPU tensor at runtime). Constants are
+      placeholders too, but their data is stored on the host, so they still
+      get an H2D copy.
     - skip_d2h_for_method_outputs: If a delegate output feeds directly to
       graph output, don't insert D2H; the output stays on device.
     """
@@ -215,7 +222,13 @@ class PropagateDevicePass(PassBase):
             if not isinstance(arg_spec, TensorSpec):
                 continue
 
-            if self.skip_h2d_for_method_inputs and self._is_placeholder(arg):
+            # A constant is a placeholder too, but its data is in the program on
+            # the host, so it still needs a copy like any other host tensor.
+            if (
+                self.skip_h2d_for_method_inputs
+                and self._is_placeholder(arg)
+                and not arg_spec.const
+            ):
                 # TODO(gasoonjia): support skip_h2d_for_method_inputs for
                 # multiple-user placeholder inputs.
                 if len(arg.users) != 1:
@@ -237,9 +250,7 @@ class PropagateDevicePass(PassBase):
                     torch.ops.et_copy._h2d_copy.default,
                     (arg,),
                 )
-                h2d_spec = _clone_spec_with_device(
-                    arg_spec, target_device_type, device_index
-                )
+                h2d_spec = _copy_output_spec(arg_spec, target_device_type, device_index)
                 h2d_node.meta["spec"] = h2d_spec
                 h2d_node.meta["val"] = arg.meta.get("val")
                 if "tensor_meta" in arg.meta:
@@ -299,7 +310,7 @@ class PropagateDevicePass(PassBase):
                 torch.ops.et_copy._d2h_copy.default,
                 (node,),
             )
-            d2h_spec = _clone_spec_with_device(spec, schema.DeviceType.CPU, 0)
+            d2h_spec = _copy_output_spec(spec, schema.DeviceType.CPU, 0)
             d2h_node.meta["spec"] = d2h_spec
             d2h_node.meta["val"] = node.meta.get("val")
             if "tensor_meta" in node.meta:

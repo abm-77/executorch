@@ -1310,6 +1310,89 @@ class TestPropagateDevicePass(unittest.TestCase):
                     "CPU placeholder",
                 )
 
+    def test_constant_feeding_device_delegate_is_copied(self):
+        """A constant feeding a device delegate gets an _h2d_copy into planned device
+        memory, with or without skip_h2d_for_method_inputs: its data lives in the
+        program on the host, so it is not a method input the caller can place."""
+
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.register_buffer("offset", torch.randn(2, 2))
+
+            def forward(self, a):
+                return torch.add(a, self.offset)
+
+        model = Model()
+        inputs = (torch.randn(2, 2),)
+        for skip in (False, True):
+            et_config = ExecutorchBackendConfig(
+                emit_stacktrace=False,
+                propagate_device_config=PropagateDeviceConfig(
+                    skip_h2d_for_method_inputs=skip
+                ),
+                enable_non_cpu_memory_planning=True,
+            )
+            for pipeline, program, gm in self._get_executorch_program(
+                model, inputs, DeviceAwarePartitioner("cuda:0"), et_config
+            ):
+                with self.subTest(pipeline=pipeline, skip=skip):
+                    nodes = _collect_device_copy_nodes(gm)
+                    # Input a is copied only when the caller cannot place it.
+                    self.assertEqual(len(nodes.h2d_nodes), 1 if skip else 2)
+                    cuda_ph, _ = self._collect_placeholders_by_device(gm)
+                    self.assertEqual(len(cuda_ph), int(skip))
+                    self.assertTrue(all(not n.meta["spec"].const for n in cuda_ph))
+                    copies = [n.meta["spec"] for n in nodes.h2d_nodes]
+                    self.assertTrue(all(not spec.const for spec in copies))
+                    self._assert_nodes_buffer_device(
+                        nodes.h2d_nodes, program, DeviceType.CUDA, pipeline, "H2D copy"
+                    )
+
+    def test_constant_copy_keeps_stored_layout(self):
+        """The copy of a constant moves its bytes as they are, so it must use the
+        layout the constant is stored in, for a transposed parameter as well as
+        a channels-last one."""
+
+        class Model(torch.nn.Module):
+            def __init__(self, weight):
+                super().__init__()
+                self.weight = torch.nn.Parameter(weight)
+
+            def forward(self, a):
+                return torch.add(a, self.weight)
+
+        weights = {
+            "transposed": torch.randn(3, 2).t(),
+            "channels_last": torch.randn(1, 2, 3, 3).to(
+                memory_format=torch.channels_last
+            ),
+        }
+        for name, weight in weights.items():
+            et_config = ExecutorchBackendConfig(
+                emit_stacktrace=False,
+                propagate_device_config=PropagateDeviceConfig(
+                    skip_h2d_for_method_inputs=True
+                ),
+                enable_non_cpu_memory_planning=True,
+            )
+            for pipeline, _program, gm in self._get_executorch_program(
+                Model(weight),
+                (torch.randn(weight.shape),),
+                DeviceAwarePartitioner("cuda:0"),
+                et_config,
+            ):
+                with self.subTest(pipeline=pipeline, weight=name):
+                    nodes = _collect_device_copy_nodes(gm)
+                    self.assertEqual(len(nodes.h2d_nodes), 1)
+                    h2d = nodes.h2d_nodes[0]
+                    # The emitter rewrites the constant's spec to the stored layout.
+                    stored = h2d.args[0].meta["spec"]
+                    self.assertEqual(h2d.meta["spec"].dim_order, stored.dim_order)
+                    self.assertEqual(
+                        tuple(h2d.meta["spec"].stride), tuple(stored.stride)
+                    )
+
     def test_tensorspec_repr_includes_device(self):
         spec = TensorSpec(dtype=torch.float32, shape=torch.Size([2, 3]))
         repr_str = repr(spec)
