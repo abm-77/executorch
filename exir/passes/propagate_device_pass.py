@@ -167,10 +167,10 @@ class PropagateDevicePass(PassBase):
 
     Skip-copy optimizations:
     - skip_h2d_for_method_inputs: If the input is a graph-level placeholder
-      feeding directly to a delegate, don't insert H2D — tag the placeholder
-      as device instead (user provides GPU tensor at runtime). Constants are
-      placeholders too, but their data is stored on the host, so they still
-      get an H2D copy.
+      read only by delegates on one device, don't insert H2D; tag the
+      placeholder as device instead (user provides GPU tensor at runtime).
+      Constants are placeholders too, but their data is stored on the host,
+      so they still get an H2D copy.
     - skip_d2h_for_method_outputs: If a delegate output feeds directly to
       graph output, don't insert D2H; the output stays on device.
     """
@@ -201,6 +201,17 @@ class PropagateDevicePass(PassBase):
         """Check if a node is a graph-level input (placeholder)."""
         return node.op == "placeholder"
 
+    def _delegate_device(
+        self, graph_module: torch.fx.GraphModule, node: torch.fx.Node
+    ) -> Optional[tuple[schema.DeviceType, int]]:
+        """The target device of a delegate call node, or None when there is none."""
+        if node.op != "call_function" or node.target != executorch_call_delegate:
+            return None
+        lowered_module = _get_lowered_module(graph_module, node)
+        if lowered_module is None:
+            return None
+        return _get_target_device_from_compile_specs(lowered_module)
+
     def _feeds_directly_to_output(self, node: torch.fx.Node) -> bool:
         """Check if all users of a node are output nodes."""
         return all(user.op == "output" for user in node.users)
@@ -229,17 +240,25 @@ class PropagateDevicePass(PassBase):
                 and self._is_placeholder(arg)
                 and not arg_spec.const
             ):
-                # TODO(gasoonjia): support skip_h2d_for_method_inputs for
-                # multiple-user placeholder inputs.
-                if len(arg.users) != 1:
+                # The spec is shared by every reader, so all of them must be
+                # delegates on this same device.
+                other_reader = next(
+                    (
+                        user
+                        for user in arg.users
+                        if self._delegate_device(graph_module, user)
+                        != (target_device_type, device_index)
+                    ),
+                    None,
+                )
+                if other_reader is not None:
                     raise RuntimeError(
-                        f"skip_h2d_for_method_inputs=True requires placeholder "
-                        f"'{arg.name}' to have exactly one user, but it has "
-                        f"{len(arg.users)} users. The placeholder is shared by "
-                        f"multiple consumers, so its TensorSpec cannot be safely "
-                        f"mutated in-place to the delegate's device. Either disable "
-                        f"skip_h2d_for_method_inputs, or ensure the placeholder is "
-                        f"used exclusively by this delegate."
+                        f"skip_h2d_for_method_inputs=True cannot place placeholder "
+                        f"'{arg.name}' on {target_device_type.name.lower()}:"
+                        f"{device_index}, because '{other_reader.name}' also reads "
+                        f"it and is not a delegate on that device. Either disable "
+                        f"skip_h2d_for_method_inputs, or use the placeholder only "
+                        f"from delegates on one device."
                     )
                 _set_device_on_spec(arg_spec, target_device_type, device_index)
                 changed = True
