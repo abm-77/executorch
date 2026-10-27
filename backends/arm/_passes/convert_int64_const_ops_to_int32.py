@@ -12,8 +12,8 @@ from executorch.backends.arm._passes import ArmPass
 from executorch.backends.arm._passes.fuse_constant_ops_pass import (
     ComputeConstantOpsAOTPass,
 )
+from executorch.backends.arm.tosa.specification import keeps_int64
 from executorch.exir.pass_base import ExportPass, PassResult
-
 
 logger = logging.getLogger(__name__)
 INT32_MIN = torch.iinfo(torch.int32).min
@@ -59,6 +59,9 @@ class ConvertInt64ConstOpsToInt32Pass(ArmPass):
 
             data = node.target(*node.args, **node.kwargs)
             if data.dtype is not torch.int64:
+                continue
+
+            if keeps_int64():
                 continue
 
             min_val, max_val = torch.min(data), torch.max(data)

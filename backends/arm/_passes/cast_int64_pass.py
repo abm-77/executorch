@@ -9,6 +9,7 @@ from typing import Set, Type
 
 import torch
 from executorch.backends.arm._passes.arm_pass import ArmPass
+from executorch.backends.arm.tosa.specification import keeps_int64
 from executorch.exir.pass_base import ExportPass, PassResult
 from torch._export.utils import is_buffer
 from torch.export import ExportedProgram
@@ -83,6 +84,8 @@ class CastInt64BuffersToInt32Pass(ArmPass):
             if not isinstance(fake_tensor, torch._subclasses.fake_tensor.FakeTensor):
                 continue
             if fake_tensor.dtype != torch.int64:
+                continue
+            if keeps_int64():
                 continue
             if is_buffer(self.exported_program, node):
                 converted += self._cast_buffer_to_int32(node)
