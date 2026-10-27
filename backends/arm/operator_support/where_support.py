@@ -13,6 +13,7 @@ from executorch.backends.arm.operator_support.tosa_supported_operators import (
     SupportedTOSAOperatorCheck,
 )
 from executorch.backends.arm.tosa import TosaSpecification
+from executorch.backends.arm.tosa.specification import keeps_int64
 from executorch.exir.dialects._ops import ops as exir_ops
 
 
@@ -56,11 +57,15 @@ class WhereSupported(SupportedTOSAOperatorCheck):
                 return True
 
         if tosa_spec.support_integer():
+            supported_int = [torch.bool, torch.int8, torch.int16, torch.int32]
+            if keeps_int64(tosa_spec):
+                supported_int.append(torch.int64)
+
             if (
-                x_dtype in (torch.bool, torch.int8, torch.int16, torch.int32)
+                x_dtype in supported_int
                 or (x_dtype == torch.float32 and x.target in DQ_OPS)
             ) and (
-                y_dtype in (torch.bool, torch.int8, torch.int16, torch.int32)
+                y_dtype in supported_int
                 or (y_dtype == torch.float32 and y.target in DQ_OPS)
             ):
                 return True
